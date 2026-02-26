@@ -37,11 +37,13 @@ RUN git clone --depth=1 https://github.com/sczhou/CodeFormer.git /app/codeformer
 # ---------- Flash Attention 2 (compiled for sm_120) ---------------------------
 # REQUIRED — HunyuanVideo-Avatar models_audio.py imports flash_attn_varlen_func
 # unconditionally at startup. Build MUST succeed or inference will not start.
-# v2.7.0 = first release with official Blackwell sm_120 support.
-# MAX_JOBS=4 avoids OOM during CUDA kernel compilation on the build runner.
-RUN pip install ninja && \
+# --no-build-isolation is mandatory: flash-attn's setup.py imports torch to
+# detect the CUDA version. Without this flag pip creates an isolated subprocess
+# that has no torch and the build fails with "No module named 'torch'".
+RUN pip install ninja packaging && \
     MAX_JOBS=4 TORCH_CUDA_ARCH_LIST="12.0" \
-    pip install git+https://github.com/Dao-AILab/flash-attention.git@v2.7.0
+    pip install --no-build-isolation \
+        git+https://github.com/Dao-AILab/flash-attention.git@v2.7.0
 
 # ---------- HunyuanVideo-Avatar Python deps ----------------------------------
 RUN pip install -r /app/hunyuan/requirements.txt
