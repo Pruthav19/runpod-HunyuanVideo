@@ -36,7 +36,6 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ── Load CodeFormer ────────────────────────────────────────────────────────
-    from basicsr.utils.download_util import load_file_from_url
     from basicsr.utils import img2tensor, tensor2img
     from basicsr.archs.codeformer_arch import CodeFormer
 
@@ -48,7 +47,9 @@ def main():
         connect_list=["32", "64", "128", "256"],
     ).to(device)
 
-    ckpt = torch.load(args.model_path, map_location=device)
+    ckpt = torch.load(args.model_path, map_location=device, weights_only=False)
+    # weights_only=False required: CodeFormer checkpoint contains numpy arrays
+    # which cannot be loaded with the PyTorch 2.6+ default of weights_only=True
     net.load_state_dict(ckpt["params_ema"] if "params_ema" in ckpt else ckpt)
     net.eval()
 
@@ -74,7 +75,7 @@ def main():
 
         img_bgr = cv2.imread(fpath)
         if img_bgr is None:
-            cv2.imwrite(out_fp, img_bgr)
+            print(f"  Skipped unreadable frame: {fname}", file=sys.stderr)
             continue
 
         face_helper.clean_all()
@@ -94,9 +95,10 @@ def main():
             with torch.no_grad():
                 out = net(t, w=args.fidelity_weight, adain=True)[0]
             restored = tensor2img(out, rgb2bgr=True, min_max=(-1, 1))
-            restored_faces.append(restored.astype("uint8"))
+            restored_face = restored.astype("uint8")
+            face_helper.add_restored_face(restored_face)   # must be called per-face
+            restored_faces.append(restored_face)
 
-        face_helper.add_restored_face(restored_faces[0])
         face_helper.get_inverse_affine(None)
         result = face_helper.paste_faces_to_input_image(upsample_img=None)
         cv2.imwrite(out_fp, result)

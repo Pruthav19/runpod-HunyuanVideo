@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3.10 python3.10-dev python3-pip python3.10-venv \
         git git-lfs wget curl ffmpeg \
         libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 \
+        libgomp1 \
         ninja-build build-essential \
     && ln -sf /usr/bin/python3.10 /usr/bin/python3 \
     && ln -sf /usr/bin/python3    /usr/bin/python \
@@ -25,10 +26,13 @@ RUN pip install --upgrade pip && \
     pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
         --index-url https://download.pytorch.org/whl/cu128
 
-# ---------- Clone HunyuanVideo-Avatar ----------------------------------------
+# ---------- Clone HunyuanVideo-Avatar + CodeFormer ---------------------------
 WORKDIR /app
 RUN git lfs install && \
     git clone https://github.com/Tencent-Hunyuan/HunyuanVideo-Avatar.git hunyuan
+
+# CodeFormer provides basicsr.archs.codeformer_arch (not present in XPixelGroup/BasicSR)
+RUN git clone --depth=1 https://github.com/sczhou/CodeFormer.git /app/codeformer
 
 # ---------- Flash Attention 2 (compiled for sm_120) ---------------------------
 # Must be built AFTER PyTorch so it links against the correct torch headers.
@@ -44,6 +48,13 @@ RUN pip install -r /app/hunyuan/requirements.txt
 # ---------- Worker deps -------------------------------------------------------
 COPY requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt
+
+# Force-reinstall basicsr from git LAST so realesrgan/facexlib cannot overwrite
+# it with the torchvision-incompatible PyPI version, then inject CodeFormer arch.
+RUN pip install --force-reinstall --no-deps \
+        git+https://github.com/XPixelGroup/BasicSR.git && \
+    BASICSR_ARCHS="$(python3 -c 'import basicsr,os; print(os.path.join(os.path.dirname(basicsr.__file__),"archs"))')" && \
+    cp /app/codeformer/basicsr/archs/codeformer_arch.py "${BASICSR_ARCHS}/"
 
 # ---------- Copy worker files -------------------------------------------------
 COPY handler.py            /app/handler.py
