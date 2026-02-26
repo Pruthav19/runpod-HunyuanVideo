@@ -34,16 +34,13 @@ RUN git lfs install && \
 # CodeFormer provides basicsr.archs.codeformer_arch (not present in XPixelGroup/BasicSR)
 RUN git clone --depth=1 https://github.com/sczhou/CodeFormer.git /app/codeformer
 
-# ---------- Flash Attention 2 (compiled for sm_120) ---------------------------
-# REQUIRED — HunyuanVideo-Avatar models_audio.py imports flash_attn_varlen_func
-# unconditionally at startup. Build MUST succeed or inference will not start.
-# --no-build-isolation is mandatory: flash-attn's setup.py imports torch to
-# detect the CUDA version. Without this flag pip creates an isolated subprocess
-# that has no torch and the build fails with "No module named 'torch'".
-RUN pip install ninja packaging && \
-    MAX_JOBS=4 TORCH_CUDA_ARCH_LIST="12.0" \
-    pip install --no-build-isolation \
-        git+https://github.com/Dao-AILab/flash-attention.git@v2.7.0
+# ---------- Flash Attention 2 — built at container startup, NOT here ----------
+# Compiling flash-attn from source requires a real CUDA GPU and ~8 GB RAM.
+# The GitHub Actions ubuntu-latest runner (2 CPU / 7 GB RAM) is killed by the
+# nvcc workload. Instead, start.sh builds it on first boot on the RunPod RTX 5090
+# and caches the .whl to the network volume so subsequent boots install instantly.
+# ninja and packaging are pre-installed here so the build in start.sh is faster.
+RUN pip install ninja packaging
 
 # ---------- HunyuanVideo-Avatar Python deps ----------------------------------
 RUN pip install -r /app/hunyuan/requirements.txt
