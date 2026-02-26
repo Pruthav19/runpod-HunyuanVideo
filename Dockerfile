@@ -27,14 +27,16 @@ RUN pip install --upgrade pip && \
 
 # ---------- Clone HunyuanVideo-Avatar ----------------------------------------
 WORKDIR /app
-RUN git clone https://github.com/Tencent-Hunyuan/HunyuanVideo-Avatar.git hunyuan && \
-    cd hunyuan && git lfs install
+RUN git lfs install && \
+    git clone https://github.com/Tencent-Hunyuan/HunyuanVideo-Avatar.git hunyuan
 
 # ---------- Flash Attention 2 (compiled for sm_120) ---------------------------
 # Must be built AFTER PyTorch so it links against the correct torch headers.
+# Non-fatal: HunyuanVideo-Avatar falls back to PyTorch SDPA if FA2 is absent.
 RUN pip install ninja && \
     MAX_JOBS=4 TORCH_CUDA_ARCH_LIST="12.0" \
-    pip install git+https://github.com/Dao-AILab/flash-attention.git@v2.7.4
+    pip install git+https://github.com/Dao-AILab/flash-attention.git@v2.7.3 \
+    || echo "⚠️  Flash Attention build failed — PyTorch SDPA fallback will be used"
 
 # ---------- HunyuanVideo-Avatar Python deps ----------------------------------
 RUN pip install -r /app/hunyuan/requirements.txt
@@ -44,9 +46,11 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt
 
 # ---------- Copy worker files -------------------------------------------------
-COPY handler.py          /app/handler.py
-COPY download_models.py  /app/download_models.py
-COPY start.sh            /app/start.sh
+COPY handler.py            /app/handler.py
+COPY download_models.py    /app/download_models.py
+COPY codeformer_worker.py  /app/codeformer_worker.py
+COPY realesrgan_worker.py  /app/realesrgan_worker.py
+COPY start.sh              /app/start.sh
 
 RUN chmod +x /app/start.sh
 

@@ -386,13 +386,12 @@ def postprocess(
         log.info("Running Real-ESRGAN x2plus upscale...")
         esr_weights = os.path.join(MODEL_DIR, "realesrgan", "RealESRGAN_x2plus.pth")
         esr_cmd = [
-            "python3", "-m", "realesrgan.inference_realesrgan",
-            "-i",  frames_after_cf,
-            "-o",  frames_esr,
-            "--model_path", esr_weights,
-            "--model_name", "RealESRGAN_x2plus",
-            "--outscale",   "2",
-            "--fp32",       # safer on Blackwell until fp16 rounding issues ironed out
+            "python3", "/app/realesrgan_worker.py",
+            "--input_path",  frames_after_cf,
+            "--output_path", frames_esr,
+            "--model_path",  esr_weights,
+            "--outscale",    "2",
+            "--fp32",        # safer on Blackwell until fp16 rounding issues ironed out
         ]
         esr_result = subprocess.run(esr_cmd, capture_output=True, text=True)
         if esr_result.returncode != 0:

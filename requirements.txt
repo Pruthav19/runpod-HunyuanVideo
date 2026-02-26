@@ -19,6 +19,9 @@ huggingface_hub>=0.23.0
 # ── Face enhancement (CodeFormer preferred over GFPGAN for identity stability) ─
 # Install codeformer from source — pip package is outdated
 # gfpgan>=1.3.8   ← replaced by CodeFormer below
-basicsr>=1.4.2
+# basicsr>=1.4.2 removed — torchvision 0.17+ dropped rgb_to_grayscale from
+# torchvision.transforms.functional_tensor which basicsr<1.4.2 imports at startup.
+# The upstream XPixelGroup repo has the fix; use it directly.
+basicsr @ git+https://github.com/XPixelGroup/BasicSR.git
 facexlib>=0.3.0
 realesrgan>=0.3.0

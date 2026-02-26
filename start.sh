@@ -57,7 +57,7 @@ export INSIGHTFACE_HOME="${HUNYUAN_WEIGHTS}/ckpts"
 # Blackwell sm_120 CUDA tuning
 export CUDA_VISIBLE_DEVICES="0"
 export TORCH_CUDA_ARCH_LIST="12.0"         # compile CUDA kernels only for sm_120
-export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:512"  # reduce memory fragmentation
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"  # PyTorch 2.4+ allocator — reduces fragmentation on large VRAM GPUs
 
 echo ""
 echo "🎬  Starting serverless handler..."
