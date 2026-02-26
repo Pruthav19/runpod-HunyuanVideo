@@ -35,12 +35,13 @@ RUN git lfs install && \
 RUN git clone --depth=1 https://github.com/sczhou/CodeFormer.git /app/codeformer
 
 # ---------- Flash Attention 2 (compiled for sm_120) ---------------------------
-# Must be built AFTER PyTorch so it links against the correct torch headers.
-# Non-fatal: HunyuanVideo-Avatar falls back to PyTorch SDPA if FA2 is absent.
+# REQUIRED — HunyuanVideo-Avatar models_audio.py imports flash_attn_varlen_func
+# unconditionally at startup. Build MUST succeed or inference will not start.
+# v2.7.0 = first release with official Blackwell sm_120 support.
+# MAX_JOBS=4 avoids OOM during CUDA kernel compilation on the build runner.
 RUN pip install ninja && \
     MAX_JOBS=4 TORCH_CUDA_ARCH_LIST="12.0" \
-    pip install git+https://github.com/Dao-AILab/flash-attention.git@v2.7.3 \
-    || echo "⚠️  Flash Attention build failed — PyTorch SDPA fallback will be used"
+    pip install git+https://github.com/Dao-AILab/flash-attention.git@v2.7.0
 
 # ---------- HunyuanVideo-Avatar Python deps ----------------------------------
 RUN pip install -r /app/hunyuan/requirements.txt
