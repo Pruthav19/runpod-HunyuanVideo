@@ -45,6 +45,11 @@ RUN pip install ninja && \
 # ---------- HunyuanVideo-Avatar Python deps ----------------------------------
 RUN pip install -r /app/hunyuan/requirements.txt
 
+# diffusers older than 0.32.0 imports FLAX_WEIGHTS_NAME from transformers.utils
+# which was removed in transformers>=4.52. Force-upgrade diffusers AFTER hunyuan
+# requirements so we always get a version that no longer has this import.
+RUN pip install --upgrade "diffusers>=0.32.0"
+
 # ---------- Worker deps -------------------------------------------------------
 COPY requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt
