@@ -1,0 +1,74 @@
+name: Build and Push Docker Image HunyuanVideo
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/hunyuanvideo-runpod
+          tags: |
+            type=raw,value=latest
+            type=sha
+
+      - name: Compute next numeric tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          USERNAME="${{ secrets.DOCKERHUB_USERNAME }}"
+          TOKEN="${{ secrets.DOCKERHUB_TOKEN }}"
+          REPO="hunyuanvideo-runpod"
+
+          JWT=$(curl -fsSL -X POST "https://hub.docker.com/v2/users/login/" \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"${USERNAME}\",\"password\":\"${TOKEN}\"}" | jq -r '.token')
+
+          LATEST_TAG=$(curl -fsSL "https://hub.docker.com/v2/repositories/${USERNAME}/${REPO}/tags?page_size=100" \
+            -H "Authorization: JWT ${JWT}" | jq -r '.results[].name' | grep -E '^[0-9]+\.[0-9]+$' | sort -t. -k1,1n -k2,2n | tail -n1 || true)
+
+          if [ -z "${LATEST_TAG}" ]; then
+            NEXT_TAG="1.0"
+          else
+            MAJOR="${LATEST_TAG%%.*}"
+            MINOR="${LATEST_TAG##*.}"
+            NEXT_TAG="${MAJOR}.$((MINOR + 1))"
+          fi
+
+          echo "next_tag=${NEXT_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/hunyuanvideo-runpod:${{ steps.version.outputs.next_tag }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
