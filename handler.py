@@ -128,6 +128,8 @@ def is_cuda_oom_error(exc: Exception) -> bool:
         "cuda out of memory" in msg
         or "torch.outofmemoryerror" in msg
         or "cublas_status_alloc_failed" in msg
+        or "tried to allocate" in msg
+        or "is free. including non-pytorch memory" in msg
     )
 
 
@@ -316,8 +318,15 @@ def run_inference(
     )
 
     if result.returncode != 0:
-        log.error(f"Inference STDERR:\n{result.stderr[-2000:]}")
-        raise RuntimeError(f"HunyuanVideo-Avatar inference failed:\n{result.stderr[-500:]}")
+        stderr_tail = result.stderr[-12000:] if result.stderr else ""
+        stdout_tail = result.stdout[-2000:] if result.stdout else ""
+        log.error(f"Inference STDERR:\n{stderr_tail}")
+        if stdout_tail:
+            log.error(f"Inference STDOUT (tail):\n{stdout_tail}")
+        raise RuntimeError(
+            "HunyuanVideo-Avatar inference failed:\n"
+            f"{stderr_tail if stderr_tail else '(no stderr)'}"
+        )
 
     log.info("Inference complete. Searching for output mp4...")
 
