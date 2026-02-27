@@ -34,13 +34,30 @@ RUN git lfs install && \
 # CodeFormer provides basicsr.archs.codeformer_arch (not present in XPixelGroup/BasicSR)
 RUN git clone --depth=1 https://github.com/sczhou/CodeFormer.git /app/codeformer
 
-# ---------- Flash Attention 2 — built at container startup, NOT here ----------
-# Compiling flash-attn from source requires a real CUDA GPU and ~8 GB RAM.
-# The GitHub Actions ubuntu-latest runner (2 CPU / 7 GB RAM) is killed by the
-# nvcc workload. Instead, start.sh builds it on first boot on the RunPod RTX 5090
-# and caches the .whl to the network volume so subsequent boots install instantly.
-# ninja and packaging are pre-installed here so the build in start.sh is faster.
-RUN pip install ninja packaging
+# ---------- Flash Attention 2 ------------------------------------------------
+# REQUIRED — models_audio.py hard-imports flash_attn_varlen_func at startup.
+#
+# Strategy:
+#   • If FLASH_ATTN_WHEEL_URL build-arg is set (GitHub Actions secret), the pre-built
+#     wheel is downloaded in ~5 seconds — no compilation, no OOM risk.
+#   • If not set (local docker build etc.), falls back to source compilation with
+#     MAX_JOBS=1 NVCC_THREADS=1 (≈ 90 min, ≈1.5 GB RAM — safe on any machine).
+#
+# To generate the pre-built wheel, run build_flash_attn_wheel.sh once on a
+# RunPod GPU pod and upload the resulting .whl to GitHub Releases.
+ARG FLASH_ATTN_WHEEL_URL=""
+RUN pip install ninja packaging && \
+    if [ -n "${FLASH_ATTN_WHEEL_URL}" ]; then \
+        echo "📦  Downloading pre-built flash-attn wheel from: ${FLASH_ATTN_WHEEL_URL}" && \
+        wget -q "${FLASH_ATTN_WHEEL_URL}" -O /tmp/flash_attn.whl && \
+        pip install --no-build-isolation /tmp/flash_attn.whl && \
+        rm /tmp/flash_attn.whl; \
+    else \
+        echo "🔨  No pre-built wheel found — compiling from source (MAX_JOBS=1, ~90 min)..." && \
+        MAX_JOBS=1 NVCC_THREADS=1 TORCH_CUDA_ARCH_LIST="12.0" \
+        pip install --no-build-isolation \
+            git+https://github.com/Dao-AILab/flash-attention.git@v2.7.0; \
+    fi
 
 # ---------- HunyuanVideo-Avatar Python deps ----------------------------------
 RUN pip install -r /app/hunyuan/requirements.txt

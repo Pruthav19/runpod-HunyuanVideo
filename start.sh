@@ -21,35 +21,6 @@ DONE_FLAG="${MODEL_DIR}/.hunyuan_avatar_download_complete"
 ln -sfn "${HUNYUAN_WEIGHTS}" /app/hunyuan/weights
 echo "🔗  Symlinked /app/hunyuan/weights → ${HUNYUAN_WEIGHTS}"
 
-# ── Flash Attention 2 (built on first boot on the actual GPU) ─────────────────
-# flash-attn must be compiled with CUDA — cannot be done on the GitHub Actions
-# runner (2 CPU / 7 GB RAM). We build it here on the RTX 5090, cache the wheel
-# to the network volume, and on every subsequent boot reinstall from the cache.
-FLASH_ATTN_WHEEL_DIR="${MODEL_DIR}/.flash_attn_wheel"
-FLASH_ATTN_TAG="v2.7.0"
-
-if python3 -c "import flash_attn" 2>/dev/null; then
-    echo "✅  flash-attn already installed — skipping build"
-else
-    CACHED_WHEEL=$(find "${FLASH_ATTN_WHEEL_DIR}" -name 'flash_attn*.whl' 2>/dev/null | head -1 || true)
-    if [ -n "${CACHED_WHEEL}" ]; then
-        echo "📦  Installing cached flash-attn wheel: ${CACHED_WHEEL}"
-        pip install --no-build-isolation "${CACHED_WHEEL}"
-    else
-        echo ""
-        echo "🔨  Building flash-attn ${FLASH_ATTN_TAG} from source on RTX 5090..."
-        echo "    (one-time ~8 min build, wheel cached to network volume afterwards)"
-        mkdir -p "${FLASH_ATTN_WHEEL_DIR}"
-        MAX_JOBS=4 TORCH_CUDA_ARCH_LIST="12.0" \
-        pip wheel --no-build-isolation \
-            --wheel-dir "${FLASH_ATTN_WHEEL_DIR}" \
-            "git+https://github.com/Dao-AILab/flash-attention.git@${FLASH_ATTN_TAG}"
-        BUILT_WHEEL=$(find "${FLASH_ATTN_WHEEL_DIR}" -name 'flash_attn*.whl' | head -1)
-        pip install --no-build-isolation "${BUILT_WHEEL}"
-        echo "✅  flash-attn built and cached at ${BUILT_WHEEL}"
-    fi
-fi
-
 # ── Download models on first boot ─────────────────────────────────────────────
 if [ ! -f "${DONE_FLAG}" ] || [ ! -f "${FP8_CKPT}" ]; then
     echo ""
