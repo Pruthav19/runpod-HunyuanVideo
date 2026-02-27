@@ -216,19 +216,28 @@ def preprocess_avatar(src: str, dst: str, target_w: int = 704, target_h: int = 1
 
 # ── CSV input file ────────────────────────────────────────────────────────────
 def write_input_csv(image_path: str, audio_path: str, csv_path: str,
+                    job_id: str = "job",
+                    prompt: str = "",
                     emotion_image_path: str | None = None) -> str:
     """
-    HunyuanVideo-Avatar's sample_gpu_poor.py reads a CSV with columns:
-        ref_image_path, audio_path[, ref_emotion_img_path]
+    HunyuanVideo-Avatar's VideoAudioTextLoaderVal (audio_dataset.py) reads a CSV
+    with exactly these columns:
+        videoid  — unique ID for the job (used in output filename)
+        image    — absolute path to the reference portrait image
+        audio    — absolute path to the 16 kHz mono WAV
+        prompt   — text description (dataset prepends fixed quality tokens)
+        fps      — output frame rate (25.0 matches the model's training FPS)
+
+    NOTE: `ref_image_path`, `audio_path`, `ref_emotion_img_path` were the OLD
+    (wrong) column names — the actual dataset code never read those fields.
     """
+    if not prompt:
+        prompt = "A person talking naturally"
+
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
-        if emotion_image_path:
-            writer.writerow(["ref_image_path", "audio_path", "ref_emotion_img_path"])
-            writer.writerow([image_path, audio_path, emotion_image_path])
-        else:
-            writer.writerow(["ref_image_path", "audio_path"])
-            writer.writerow([image_path, audio_path])
+        writer.writerow(["videoid", "image", "audio", "prompt", "fps"])
+        writer.writerow([job_id, image_path, audio_path, prompt, "25.0"])
     return csv_path
 
 
@@ -237,6 +246,8 @@ def run_inference(
     image_path: str,
     audio_path: str,
     output_dir: str,
+    job_id: str = "job",
+    prompt: str = "",
     emotion_image_path: str | None = None,
     *,
     # Quality / speed knobs
@@ -259,7 +270,7 @@ def run_inference(
     os.makedirs(output_dir, exist_ok=True)
 
     csv_path = os.path.join(output_dir, "input.csv")
-    write_input_csv(image_path, audio_path, csv_path, emotion_image_path)
+    write_input_csv(image_path, audio_path, csv_path, job_id=job_id, prompt=prompt)
 
     cmd = [
         "python3", "hymm_sp/sample_gpu_poor.py",
@@ -512,6 +523,8 @@ def handler(event: dict) -> dict:
             image_path        = img_path,
             audio_path        = wav_path,
             output_dir        = infer_out_dir,
+            job_id            = job_id,
+            prompt            = inp.get("prompt", ""),
             emotion_image_path= emotion_img_path,
             infer_steps       = int(inp.get("infer_steps",   50)),
             cfg_scale         = float(inp.get("cfg_scale",   7.5)),
