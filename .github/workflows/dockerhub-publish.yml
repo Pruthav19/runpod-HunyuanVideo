@@ -71,5 +71,3 @@ jobs:
             ${{ steps.meta.outputs.tags }}
             ${{ secrets.DOCKERHUB_USERNAME }}/hunyuanvideo-runpod:${{ steps.version.outputs.next_tag }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
