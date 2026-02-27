@@ -53,6 +53,9 @@ export PYTHONPATH="/app/hunyuan:${PYTHONPATH:-}"
 export MODEL_DIR="${MODEL_DIR}"
 export MODEL_BASE="${HUNYUAN_WEIGHTS}"
 export INSIGHTFACE_HOME="${HUNYUAN_WEIGHTS}/ckpts"
+# facexlib auto-downloads detection/parsing models here so they persist
+# across cold starts on the network volume instead of re-downloading every time.
+export FACEXLIB_CACHE="${MODEL_DIR}/facexlib"
 
 # Blackwell sm_120 CUDA tuning
 export CUDA_VISIBLE_DEVICES="0"

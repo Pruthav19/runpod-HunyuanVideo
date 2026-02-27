@@ -285,8 +285,14 @@ def run_inference(
         "--flow-shift-eval-video", str(flow_shift),
         "--save-path",          output_dir,
         "--use-fp8",            # FP8 quantised transformer — fits 32 GB VRAM
-        "--cpu-offload",        # offload VAE / text encoder to CPU between steps
-        "--infer-min",          # minimal memory footprint mode
+        # NOTE: --cpu-offload intentionally REMOVED — RTX 5090 has 32 GB VRAM;
+        # the FP8 model is ~18 GB and fits without block-level CPU offloading.
+        # With --cpu-offload, apply_group_offloading moves every transformer block
+        # to CPU one at a time → GPU stays at 7%, CPU pins at 100%, 10–50× slower.
+        #
+        # NOTE: --infer-min intentionally REMOVED — it hardcodes audio_len=129
+        # frames (5.16 s at 25 fps), truncating all longer audio.  n_frames is
+        # now computed dynamically from the actual audio duration in handler().
     ]
 
     env = os.environ.copy()
@@ -520,6 +526,13 @@ def handler(event: dict) -> dict:
         duration = get_audio_duration(wav_path)
         log.info(f"Audio duration: {duration:.1f}s")
 
+        # Compute n_frames from audio duration so the generated video covers
+        # the full audio clip.  Model generates at 25 fps; minimum 129 frames
+        # (one TPSF chunk); cap at 257 frames (~10 s) for VRAM headroom.
+        _FPS = 25.0
+        n_frames = max(129, min(int(duration * _FPS + 0.5), 257))
+        log.info(f"n_frames = {n_frames} ({n_frames / _FPS:.1f} s at {_FPS} fps)")
+
         # ── Step 3: Inference ────────────────────────────────────────────────
         infer_out_dir = os.path.join(job_dir, "infer_out")
         raw_video = run_inference(
@@ -534,6 +547,7 @@ def handler(event: dict) -> dict:
             image_size        = int(inp.get("image_size",    704)),
             flow_shift        = float(inp.get("flow_shift",  5.0)),
             use_deepcache     = int(inp.get("use_deepcache", 1)),
+            n_frames          = n_frames,
         )
 
         # ── Step 4: Upload raw video (safety net) ────────────────────────────
