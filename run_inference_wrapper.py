@@ -16,6 +16,69 @@ import torch
 import torch.distributed as dist
 
 
+def _enable_flash_attn_fallback_if_needed():
+    """
+    Some flash-attn builds (e.g. older wheels) reject Blackwell devices at
+    runtime with: "FlashAttention only supports Ampere GPUs or newer".
+    For that case, patch flash_attn_varlen_func with a safe SDPA fallback.
+    """
+    if not torch.cuda.is_available():
+        return
+
+    force_flag = os.environ.get("FORCE_SDPA_FALLBACK", "0") == "1"
+    major, _minor = torch.cuda.get_device_capability(0)
+
+    # FlashAttention 2.x wheels frequently only recognize SM8x/SM9x.
+    # Blackwell (SM12x) may fail even though hardware is newer.
+    needs_patch = force_flag or major >= 10
+    if not needs_patch:
+        return
+
+    try:
+        import torch.nn.functional as F
+        import flash_attn.flash_attn_interface as fai
+
+        def _sdpa_varlen_fallback(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            *args,
+            **kwargs,
+        ):
+            # Expected q/k/v shape: [total_tokens, num_heads, head_dim]
+            total_q, num_heads, head_dim = q.shape
+            total_k = k.shape[0]
+
+            # Hunyuan uses a packed layout equivalent to [B * max_seqlen, H, D]
+            # for these tensors in inference. Recover batch size from totals.
+            bq = max(1, total_q // max_seqlen_q)
+            bk = max(1, total_k // max_seqlen_k)
+            batch = min(bq, bk)
+
+            q4 = q.view(batch, max_seqlen_q, num_heads, head_dim).permute(0, 2, 1, 3).contiguous()
+            k4 = k.view(batch, max_seqlen_k, num_heads, head_dim).permute(0, 2, 1, 3).contiguous()
+            v4 = v.view(batch, max_seqlen_k, num_heads, head_dim).permute(0, 2, 1, 3).contiguous()
+
+            out = F.scaled_dot_product_attention(
+                q4,
+                k4,
+                v4,
+                attn_mask=None,
+                dropout_p=0.0,
+                is_causal=False,
+            )
+            return out.permute(0, 2, 1, 3).contiguous().view(total_q, num_heads, head_dim)
+
+        fai.flash_attn_varlen_func = _sdpa_varlen_fallback
+        print("[wrapper] Patched flash_attn_varlen_func -> SDPA fallback")
+    except Exception as exc:
+        print(f"[wrapper] FlashAttention fallback patch skipped: {exc}")
+
+
 def _init_dist():
     """Initialise single-process distributed group if not already done."""
     if dist.is_initialized():
@@ -41,6 +104,7 @@ def _init_dist():
 
 
 if __name__ == "__main__":
+    _enable_flash_attn_fallback_if_needed()
     _init_dist()
 
     # Patch sys.argv so sample_gpu_poor.py sees exactly the args it expects
