@@ -45,7 +45,7 @@ RUN git clone --depth=1 https://github.com/sczhou/CodeFormer.git /app/codeformer
 #
 # To generate the pre-built wheel, run build_flash_attn_wheel.sh once on a
 # RunPod GPU pod and upload the resulting .whl to GitHub Releases.
-ARG FLASH_ATTN_WHEEL_URL=""
+ARG FLASH_ATTN_WHEEL_URL="https://github.com/Pruthav19/runpod-HunyuanVideo/releases/download/flash-attn-wheel/flash_attn-2.7.0-cp310-cp310-linux_x86_64.whl"
 RUN pip install ninja packaging && \
     if [ -n "${FLASH_ATTN_WHEEL_URL}" ]; then \
         echo "📦  Downloading pre-built flash-attn wheel from: ${FLASH_ATTN_WHEEL_URL}" && \

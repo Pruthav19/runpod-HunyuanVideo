@@ -71,7 +71,5 @@ jobs:
             ${{ steps.meta.outputs.tags }}
             ${{ secrets.DOCKERHUB_USERNAME }}/hunyuanvideo-runpod:${{ steps.version.outputs.next_tag }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            FLASH_ATTN_WHEEL_URL=${{ secrets.FLASH_ATTN_WHEEL_URL }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
