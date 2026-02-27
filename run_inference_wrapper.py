@@ -51,4 +51,8 @@ if __name__ == "__main__":
     # Run the target script in __main__ scope so its  `if __name__ == "__main__":`
     # guard fires normally.
     import runpy
-    runpy.run_path(script, run_name="__main__")
+    try:
+        runpy.run_path(script, run_name="__main__")
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()

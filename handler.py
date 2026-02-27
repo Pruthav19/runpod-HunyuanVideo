@@ -122,6 +122,15 @@ def get_video_fps(path: str) -> float:
     return float(Fraction(raw))
 
 
+def is_cuda_oom_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        "cuda out of memory" in msg
+        or "torch.outofmemoryerror" in msg
+        or "cublas_status_alloc_failed" in msg
+    )
+
+
 # ── Avatar image pre-processing ───────────────────────────────────────────────
 def preprocess_avatar(src: str, dst: str, target_w: int = 704, target_h: int = 1280) -> str:
     """
@@ -257,6 +266,7 @@ def run_inference(
     n_frames: int      = 129,    # 129 frames ≈ 5.16 s at 25 fps (max per chunk)
     flow_shift: float  = 5.0,
     use_deepcache: int = 1,      # DeepCache acceleration (1=on, 0=off)
+    cpu_offload: bool   = False,
     seed: int          = 42,
 ) -> str:
     """
@@ -285,15 +295,10 @@ def run_inference(
         "--flow-shift-eval-video", str(flow_shift),
         "--save-path",          output_dir,
         "--use-fp8",            # FP8 quantised transformer — fits 32 GB VRAM
-        # NOTE: --cpu-offload intentionally REMOVED — RTX 5090 has 32 GB VRAM;
-        # the FP8 model is ~18 GB and fits without block-level CPU offloading.
-        # With --cpu-offload, apply_group_offloading moves every transformer block
-        # to CPU one at a time → GPU stays at 7%, CPU pins at 100%, 10–50× slower.
-        #
-        # NOTE: --infer-min intentionally REMOVED — it hardcodes audio_len=129
-        # frames (5.16 s at 25 fps), truncating all longer audio.  n_frames is
-        # now computed dynamically from the actual audio duration in handler().
     ]
+
+    if cpu_offload:
+        cmd.append("--cpu-offload")
 
     env = os.environ.copy()
     env["PYTHONPATH"] = HUNYUAN_DIR
@@ -527,28 +532,68 @@ def handler(event: dict) -> dict:
         log.info(f"Audio duration: {duration:.1f}s")
 
         # Compute n_frames from audio duration so the generated video covers
-        # the full audio clip.  Model generates at 25 fps; minimum 129 frames
-        # (one TPSF chunk); cap at 257 frames (~10 s) for VRAM headroom.
+        # the full audio clip. Model generates at 25 fps.
         _FPS = 25.0
-        n_frames = max(129, min(int(duration * _FPS + 0.5), 257))
+        requested_n_frames = int(duration * _FPS + 0.5)
+        n_frames = max(129, min(requested_n_frames, 257))
         log.info(f"n_frames = {n_frames} ({n_frames / _FPS:.1f} s at {_FPS} fps)")
 
         # ── Step 3: Inference ────────────────────────────────────────────────
         infer_out_dir = os.path.join(job_dir, "infer_out")
-        raw_video = run_inference(
-            image_path        = img_path,
-            audio_path        = wav_path,
-            output_dir        = infer_out_dir,
-            job_id            = job_id,
-            prompt            = inp.get("prompt", ""),
-            emotion_image_path= emotion_img_path,
-            infer_steps       = int(inp.get("infer_steps",   50)),
-            cfg_scale         = float(inp.get("cfg_scale",   7.5)),
-            image_size        = int(inp.get("image_size",    704)),
-            flow_shift        = float(inp.get("flow_shift",  5.0)),
-            use_deepcache     = int(inp.get("use_deepcache", 1)),
-            n_frames          = n_frames,
-        )
+        infer_steps = int(inp.get("infer_steps", 50))
+        cfg_scale = float(inp.get("cfg_scale", 7.5))
+        image_size = int(inp.get("image_size", 704))
+        flow_shift = float(inp.get("flow_shift", 5.0))
+        requested_deepcache = int(inp.get("use_deepcache", 1))
+
+        frame_candidates = []
+        for f in (n_frames, 225, 193, 161, 129):
+            if f >= 129 and f not in frame_candidates:
+                frame_candidates.append(f)
+
+        attempts: list[tuple[int, int, bool]] = []
+        attempts.append((frame_candidates[0], requested_deepcache, False))
+        if requested_deepcache == 0:
+            attempts.append((frame_candidates[0], 1, False))
+        for frames in frame_candidates[1:]:
+            attempts.append((frames, 1, False))
+        attempts.append((129, 1, True))
+
+        raw_video = ""
+        last_error: Exception | None = None
+        for idx, (attempt_frames, attempt_deepcache, attempt_cpu_offload) in enumerate(attempts, start=1):
+            try:
+                log.info(
+                    f"Inference attempt {idx}/{len(attempts)}: "
+                    f"n_frames={attempt_frames}, use_deepcache={attempt_deepcache}, "
+                    f"cpu_offload={attempt_cpu_offload}"
+                )
+                raw_video = run_inference(
+                    image_path=img_path,
+                    audio_path=wav_path,
+                    output_dir=infer_out_dir,
+                    job_id=job_id,
+                    prompt=inp.get("prompt", ""),
+                    emotion_image_path=emotion_img_path,
+                    infer_steps=infer_steps,
+                    cfg_scale=cfg_scale,
+                    image_size=image_size,
+                    flow_shift=flow_shift,
+                    use_deepcache=attempt_deepcache,
+                    n_frames=attempt_frames,
+                    cpu_offload=attempt_cpu_offload,
+                )
+                break
+            except RuntimeError as err:
+                last_error = err
+                if not is_cuda_oom_error(err):
+                    raise
+                log.warning(
+                    f"Inference attempt {idx} failed with CUDA OOM; trying lower-memory settings."
+                )
+
+        if not raw_video:
+            raise RuntimeError(f"All inference attempts failed. Last error: {last_error}")
 
         # ── Step 4: Upload raw video (safety net) ────────────────────────────
         raw_key = f"generated_videos/{job_id}_raw.mp4"
