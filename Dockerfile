@@ -61,9 +61,11 @@ RUN pip install ninja packaging && \
 RUN pip install -r /app/hunyuan/requirements.txt
 
 # diffusers older than 0.32.0 imports FLAX_WEIGHTS_NAME from transformers.utils
-# which was removed in transformers>=4.52. Force-upgrade diffusers AFTER hunyuan
-# requirements so we always get a version that no longer has this import.
-RUN pip install --upgrade "diffusers>=0.32.0"
+# which was removed in transformers>=4.52. Upgrade diffusers, then pin transformers
+# back to 4.46.x: new enough for diffusers 0.32 (requires >=4.41), old enough that
+# LlavaForConditionalGeneration still exposes `.language_model` (removed in 4.48+).
+RUN pip install --upgrade "diffusers>=0.32.0" && \
+    pip install "transformers>=4.44.0,<4.48.0"
 
 # ---------- Worker deps -------------------------------------------------------
 COPY requirements.txt /app/requirements.txt
