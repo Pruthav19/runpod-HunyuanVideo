@@ -273,7 +273,10 @@ def run_inference(
     write_input_csv(image_path, audio_path, csv_path, job_id=job_id, prompt=prompt)
 
     cmd = [
-        "python3", "hymm_sp/sample_gpu_poor.py",
+        "torchrun",
+        "--nproc_per_node=1",       # single GPU — initialises process group so
+        "--master_port=29500",       # parallel_attention / DistributedSampler don't crash
+        "hymm_sp/sample_gpu_poor.py",
         "--input",              csv_path,
         "--ckpt",               CKPT_PATH,
         "--sample-n-frames",    str(n_frames),
@@ -294,6 +297,9 @@ def run_inference(
     env["MODEL_BASE"]  = os.path.join(MODEL_DIR, "hunyuan_avatar")
     # Tell InsightFace where to look for buffalo_l
     env["INSIGHTFACE_HOME"] = os.path.join(MODEL_DIR, "hunyuan_avatar", "ckpts")
+    # Required by torchrun even for single-GPU — parallel_states.py calls get_rank()
+    env.setdefault("MASTER_ADDR", "127.0.0.1")
+    env.setdefault("MASTER_PORT", "29500")
 
     log.info(f"Running HunyuanVideo-Avatar: {' '.join(cmd)}")
     result = subprocess.run(
