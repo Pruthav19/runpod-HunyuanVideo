@@ -273,10 +273,7 @@ def run_inference(
     write_input_csv(image_path, audio_path, csv_path, job_id=job_id, prompt=prompt)
 
     cmd = [
-        "torchrun",
-        "--nproc_per_node=1",       # single GPU — initialises process group so
-        "--master_port=29500",       # parallel_attention / DistributedSampler don't crash
-        "hymm_sp/sample_gpu_poor.py",
+        "python3", "/app/run_inference_wrapper.py",
         "--input",              csv_path,
         "--ckpt",               CKPT_PATH,
         "--sample-n-frames",    str(n_frames),

@@ -83,6 +83,7 @@ COPY handler.py            /app/handler.py
 COPY download_models.py    /app/download_models.py
 COPY codeformer_worker.py  /app/codeformer_worker.py
 COPY realesrgan_worker.py  /app/realesrgan_worker.py
+COPY run_inference_wrapper.py /app/run_inference_wrapper.py
 COPY start.sh              /app/start.sh
 
 RUN chmod +x /app/start.sh
