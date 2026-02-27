@@ -48,10 +48,8 @@ RUN git clone --depth=1 https://github.com/sczhou/CodeFormer.git /app/codeformer
 ARG FLASH_ATTN_WHEEL_URL="https://github.com/Pruthav19/runpod-HunyuanVideo/releases/download/flash-attn-wheel/flash_attn-2.7.0-cp310-cp310-linux_x86_64.whl"
 RUN pip install ninja packaging && \
     if [ -n "${FLASH_ATTN_WHEEL_URL}" ]; then \
-        echo "📦  Downloading pre-built flash-attn wheel from: ${FLASH_ATTN_WHEEL_URL}" && \
-        wget -q "${FLASH_ATTN_WHEEL_URL}" -O /tmp/flash_attn.whl && \
-        pip install --no-build-isolation /tmp/flash_attn.whl && \
-        rm /tmp/flash_attn.whl; \
+        echo "📦  Installing pre-built flash-attn wheel from: ${FLASH_ATTN_WHEEL_URL}" && \
+        pip install --no-build-isolation "${FLASH_ATTN_WHEEL_URL}"; \
     else \
         echo "🔨  No pre-built wheel found — compiling from source (MAX_JOBS=1, ~90 min)..." && \
         MAX_JOBS=1 NVCC_THREADS=1 TORCH_CUDA_ARCH_LIST="12.0" \
