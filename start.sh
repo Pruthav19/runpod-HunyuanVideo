@@ -58,7 +58,8 @@ export INSIGHTFACE_HOME="${HUNYUAN_WEIGHTS}/ckpts"
 export FACEXLIB_CACHE="${MODEL_DIR}/facexlib"
 
 # Blackwell sm_120 CUDA tuning
-export CUDA_VISIBLE_DEVICES="0"
+# Leave CUDA_VISIBLE_DEVICES unset by default so multi-GPU pods expose all GPUs.
+# The handler picks a target device per request (auto or input.gpu_id).
 export TORCH_CUDA_ARCH_LIST="12.0"         # compile CUDA kernels only for sm_120
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"  # PyTorch 2.4+ allocator — reduces fragmentation on large VRAM GPUs
 

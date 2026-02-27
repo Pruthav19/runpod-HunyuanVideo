@@ -133,6 +133,36 @@ def is_cuda_oom_error(exc: Exception) -> bool:
     )
 
 
+def get_best_gpu_index() -> int:
+    """Pick the GPU with the most free VRAM (best-effort, defaults to 0)."""
+    try:
+        r = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,memory.free,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        best_index = 0
+        best_free = -1
+        for line in r.stdout.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) != 3:
+                continue
+            index = int(parts[0])
+            free_mb = int(parts[1])
+            if free_mb > best_free:
+                best_free = free_mb
+                best_index = index
+        return best_index
+    except Exception as exc:
+        log.warning(f"Could not auto-select GPU, falling back to GPU 0: {exc}")
+        return 0
+
+
 # ── Avatar image pre-processing ───────────────────────────────────────────────
 def preprocess_avatar(src: str, dst: str, target_w: int = 704, target_h: int = 1280) -> str:
     """
@@ -269,6 +299,7 @@ def run_inference(
     flow_shift: float  = 5.0,
     use_deepcache: int = 1,      # DeepCache acceleration (1=on, 0=off)
     cpu_offload: bool   = False,
+    gpu_id: int | None  = None,
     seed: int          = 42,
 ) -> str:
     """
@@ -310,6 +341,8 @@ def run_inference(
     # Required by torchrun even for single-GPU — parallel_states.py calls get_rank()
     env.setdefault("MASTER_ADDR", "127.0.0.1")
     env.setdefault("MASTER_PORT", "29500")
+    if gpu_id is not None:
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
     log.info(f"Running HunyuanVideo-Avatar: {' '.join(cmd)}")
     result = subprocess.run(
@@ -554,6 +587,13 @@ def handler(event: dict) -> dict:
         image_size = int(inp.get("image_size", 704))
         flow_shift = float(inp.get("flow_shift", 5.0))
         requested_deepcache = int(inp.get("use_deepcache", 1))
+        user_gpu_id = inp.get("gpu_id")
+        if user_gpu_id is None:
+            target_gpu = get_best_gpu_index()
+            log.info(f"Auto-selected GPU {target_gpu} (most free VRAM)")
+        else:
+            target_gpu = int(user_gpu_id)
+            log.info(f"Using requested GPU {target_gpu}")
 
         frame_candidates = []
         for f in (n_frames, 225, 193, 161, 129):
@@ -564,8 +604,11 @@ def handler(event: dict) -> dict:
         attempts.append((frame_candidates[0], requested_deepcache, False))
         if requested_deepcache == 0:
             attempts.append((frame_candidates[0], 1, False))
+        # If OOM persists at this point, model + encoders are too large for free VRAM.
+        # Try cpu_offload early before wasting attempts on frame-count reductions.
+        attempts.append((frame_candidates[0], 1, True))
         for frames in frame_candidates[1:]:
-            attempts.append((frames, 1, False))
+            attempts.append((frames, 1, True))
         attempts.append((129, 1, True))
 
         raw_video = ""
@@ -591,6 +634,7 @@ def handler(event: dict) -> dict:
                     use_deepcache=attempt_deepcache,
                     n_frames=attempt_frames,
                     cpu_offload=attempt_cpu_offload,
+                    gpu_id=target_gpu,
                 )
                 break
             except RuntimeError as err:
