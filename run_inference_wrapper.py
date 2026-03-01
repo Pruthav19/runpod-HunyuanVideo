@@ -75,7 +75,6 @@ def _enable_flash_attn_fallback_if_needed():
             q/k/v come in as ``[total_tokens, num_heads, head_dim]``.
             """
             total_q, num_heads, head_dim = q.shape
-            total_k = k.shape[0]
 
             scale = softmax_scale if softmax_scale is not None else (1.0 / math.sqrt(head_dim))
 
@@ -83,8 +82,8 @@ def _enable_flash_attn_fallback_if_needed():
 
             if batch == 1:
                 # Fast path: single sequence — just reshape, no padding needed.
-                seq_q = max_seqlen_q
-                seq_k = max_seqlen_k
+                seq_q = int((cu_seqlens_q[1] - cu_seqlens_q[0]).item())
+                seq_k = int((cu_seqlens_k[1] - cu_seqlens_k[0]).item())
                 q4 = q[:seq_q].view(1, seq_q, num_heads, head_dim).transpose(1, 2)
                 k4 = k[:seq_k].view(1, seq_k, num_heads, head_dim).transpose(1, 2)
                 v4 = v[:seq_k].view(1, seq_k, num_heads, head_dim).transpose(1, 2)
@@ -98,51 +97,34 @@ def _enable_flash_attn_fallback_if_needed():
                 )
                 return out.transpose(1, 2).reshape(total_q, num_heads, head_dim)
 
-            # General path: multiple sequences of (possibly) different lengths.
-            # Pad to max_seqlen and batch them together with an attention mask
-            # to prevent cross-sequence leakage.
-            dtype = q.dtype
-            device = q.device
-
-            q_padded = q.new_zeros(batch, max_seqlen_q, num_heads, head_dim)
-            k_padded = k.new_zeros(batch, max_seqlen_k, num_heads, head_dim)
-            v_padded = v.new_zeros(batch, max_seqlen_k, num_heads, head_dim)
-
-            # Boolean mask: True = attend, False = ignore
-            mask_q = torch.zeros(batch, max_seqlen_q, dtype=torch.bool, device=device)
-            mask_k = torch.zeros(batch, max_seqlen_k, dtype=torch.bool, device=device)
-
-            for i in range(batch):
-                sq = cu_seqlens_q[i + 1] - cu_seqlens_q[i]
-                sk = cu_seqlens_k[i + 1] - cu_seqlens_k[i]
-                q_padded[i, :sq] = q[cu_seqlens_q[i]:cu_seqlens_q[i + 1]]
-                k_padded[i, :sk] = k[cu_seqlens_k[i]:cu_seqlens_k[i + 1]]
-                v_padded[i, :sk] = v[cu_seqlens_k[i]:cu_seqlens_k[i + 1]]
-                mask_q[i, :sq] = True
-                mask_k[i, :sk] = True
-
-            # SDPA wants [B, H, S, D]
-            q4 = q_padded.transpose(1, 2)
-            k4 = k_padded.transpose(1, 2)
-            v4 = v_padded.transpose(1, 2)
-
-            # Build [B, 1, Sq, Sk] mask from the per-sequence masks
-            attn_mask = mask_q.unsqueeze(-1) & mask_k.unsqueeze(-2)  # [B, Sq, Sk]
-            attn_mask = attn_mask.unsqueeze(1)  # [B, 1, Sq, Sk] — broadcast over heads
-
-            out = F.scaled_dot_product_attention(
-                q4, k4, v4,
-                attn_mask=attn_mask,
-                dropout_p=dropout_p if q.requires_grad else 0.0,
-                is_causal=False,  # causal masking + padding is tricky; mask handles it
-                scale=scale,
-            )
-            # Unpad back to packed layout
-            out = out.transpose(1, 2)  # [B, S, H, D]
+            # General path: multiple variable-length sequences.
+            # Process each sequence independently to avoid allocating a giant
+            # dense [B, Sq, Sk] attention mask (which can OOM on long clips).
             parts = []
             for i in range(batch):
-                sq = cu_seqlens_q[i + 1] - cu_seqlens_q[i]
-                parts.append(out[i, :sq])
+                q_start = int(cu_seqlens_q[i].item())
+                q_end = int(cu_seqlens_q[i + 1].item())
+                k_start = int(cu_seqlens_k[i].item())
+                k_end = int(cu_seqlens_k[i + 1].item())
+
+                q_i = q[q_start:q_end]  # [Sq, H, D]
+                k_i = k[k_start:k_end]  # [Sk, H, D]
+                v_i = v[k_start:k_end]  # [Sk, H, D]
+
+                q4 = q_i.unsqueeze(0).transpose(1, 2)  # [1, H, Sq, D]
+                k4 = k_i.unsqueeze(0).transpose(1, 2)  # [1, H, Sk, D]
+                v4 = v_i.unsqueeze(0).transpose(1, 2)  # [1, H, Sk, D]
+
+                out_i = F.scaled_dot_product_attention(
+                    q4,
+                    k4,
+                    v4,
+                    attn_mask=None,
+                    dropout_p=dropout_p if q.requires_grad else 0.0,
+                    is_causal=causal,
+                    scale=scale,
+                )
+                parts.append(out_i.transpose(1, 2).squeeze(0))  # [Sq, H, D]
             return torch.cat(parts, dim=0)  # [total_q, H, D]
 
         # ── non-varlen (standard batched) fallback ────────────────────────
