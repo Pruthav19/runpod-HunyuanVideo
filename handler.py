@@ -526,8 +526,11 @@ def handler(event: dict) -> dict:
         "infer_steps"     : 50,     # diffusion steps (default 50, max ~60)
         "cfg_scale"       : 7.5,    # guidance scale (7.5 recommended, 6–9 range)
         "image_size"      : 704,    # portrait width in px (height auto = 1280)
+        "n_frames"        : 129,    # safer default; model handles long audio via chunking
         "flow_shift"      : 5.0,    # flow-matching shift (5.0 for stable output)
         "use_deepcache"   : 1,      # DeepCache speed-up (1=on, 0=off for max quality)
+        "cpu_offload"     : false,  # optional, auto-enabled for risky frame/VRAM combos
+        "retry_on_oom"    : false,  # default fast-fail; set true to try fallback ladder
 
         # ── Post-processing ──────────────────────────────────────────────────
         "enhance"         : true,   # CodeFormer + Real-ESRGAN (default: true)
@@ -585,12 +588,12 @@ def handler(event: dict) -> dict:
         duration = get_audio_duration(wav_path)
         log.info(f"Audio duration: {duration:.1f}s")
 
-        # Compute n_frames from audio duration so the generated video covers
-        # the full audio clip. Model generates at 25 fps.
-        _FPS = 25.0
-        requested_n_frames = int(duration * _FPS + 0.5)
-        n_frames = max(129, min(requested_n_frames, 257))
-        log.info(f"n_frames = {n_frames} ({n_frames / _FPS:.1f} s at {_FPS} fps)")
+        # Keep n_frames conservative by default.
+        # HunyuanVideo-Avatar already chunks long audio internally; using 257
+        # can spike VRAM heavily on single-GPU inference.
+        n_frames = int(inp.get("n_frames", 129))
+        n_frames = max(129, min(n_frames, 257))
+        log.info(f"n_frames = {n_frames} (user/default setting)")
 
         # ── Step 3: Inference ────────────────────────────────────────────────
         infer_out_dir = os.path.join(job_dir, "infer_out")
@@ -599,6 +602,7 @@ def handler(event: dict) -> dict:
         image_size = int(inp.get("image_size", 704))
         flow_shift = float(inp.get("flow_shift", 5.0))
         requested_deepcache = int(inp.get("use_deepcache", 1))
+        retry_on_oom = bool(inp.get("retry_on_oom", False))
         user_gpu_id = inp.get("gpu_id")
         if user_gpu_id is None:
             target_gpu, gpu_free_mb, gpu_total_mb = get_best_gpu_info()
@@ -611,38 +615,51 @@ def handler(event: dict) -> dict:
             _, gpu_free_mb, gpu_total_mb = get_best_gpu_info()
             log.info(f"Using requested GPU {target_gpu}")
 
+        requested_cpu_offload = bool(inp.get("cpu_offload", False))
+
         # The FP8 model + VAE + text encoders occupy ~30.6 GiB of VRAM.
         # On GPUs with ≤40 GB total, inference without cpu_offload will
         # ALWAYS OOM at pixel_value_ref normalisation.  Skip those attempts
         # entirely to save ~80 s × N wasted model-load cycles.
         OFFLOAD_REQUIRED_BELOW_MB = 40 * 1024   # 40 GiB
+        offload_reason = ""
         force_offload = gpu_total_mb > 0 and gpu_total_mb < OFFLOAD_REQUIRED_BELOW_MB
         if force_offload:
-            log.info(
-                f"GPU has {gpu_total_mb} MiB total VRAM (< {OFFLOAD_REQUIRED_BELOW_MB} MiB) "
-                f"— cpu_offload will be forced on ALL attempts"
+            offload_reason = (
+                f"GPU total VRAM {gpu_total_mb} MiB is below {OFFLOAD_REQUIRED_BELOW_MB} MiB"
             )
 
-        frame_candidates = []
-        for f in (n_frames, 225, 193, 161, 129):
-            if f >= 129 and f not in frame_candidates:
-                frame_candidates.append(f)
+        # On 80GB A100-class cards, very high frame counts can still OOM near
+        # the attention/MLP blocks (observed around n_frames=257). Auto-enable
+        # cpu_offload unless user explicitly requested otherwise.
+        if gpu_total_mb >= 80 * 1024 and n_frames >= 193 and "cpu_offload" not in inp:
+            force_offload = True
+            offload_reason = (
+                f"n_frames={n_frames} on ~80GB GPU can OOM in attention/MLP blocks"
+            )
+
+        if force_offload:
+            log.info(f"cpu_offload forced: {offload_reason}")
+
+        effective_cpu_offload = requested_cpu_offload or force_offload
 
         attempts: list[tuple[int, int, bool]] = []
 
-        if not force_offload:
-            # Only try without offload if the GPU actually has enough VRAM
-            attempts.append((frame_candidates[0], requested_deepcache, False))
+        if not retry_on_oom:
+            # Fast-fail mode (default): single deterministic attempt
+            attempts.append((n_frames, requested_deepcache, effective_cpu_offload))
+        else:
+            # Optional fallback ladder for unstable environments
+            attempts.append((n_frames, requested_deepcache, effective_cpu_offload))
             if requested_deepcache == 0:
-                attempts.append((frame_candidates[0], 1, False))
+                attempts.append((n_frames, 1, effective_cpu_offload))
+            if n_frames != 129:
+                attempts.append((129, 1, True))
 
-        # With cpu_offload: start at full frames, then reduce
-        attempts.append((frame_candidates[0], requested_deepcache, True))
-        for frames in frame_candidates[1:]:
-            attempts.append((frames, 1, True))
-        # Ensure we always have a 129-frame fallback
-        if not any(a[0] == 129 and a[2] for a in attempts):
-            attempts.append((129, 1, True))
+        log.info(
+            f"retry_on_oom={retry_on_oom}; planned attempts={len(attempts)}; "
+            f"default_cpu_offload={effective_cpu_offload}"
+        )
 
         raw_video = ""
         last_error: Exception | None = None
@@ -674,8 +691,10 @@ def handler(event: dict) -> dict:
                 last_error = err
                 if not is_cuda_oom_error(err):
                     raise
+                if idx >= len(attempts):
+                    raise
                 log.warning(
-                    f"Inference attempt {idx} failed with CUDA OOM; trying lower-memory settings."
+                    f"Inference attempt {idx} failed with CUDA OOM; trying fallback settings."
                 )
 
         if not raw_video:
