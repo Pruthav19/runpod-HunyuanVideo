@@ -18,26 +18,41 @@ import torch.distributed as dist
 
 def _enable_flash_attn_fallback_if_needed():
     """
-    Some flash-attn builds (e.g. older wheels) reject Blackwell devices at
-    runtime with: "FlashAttention only supports Ampere GPUs or newer".
-    For that case, patch flash_attn_varlen_func with a safe SDPA fallback.
+    FlashAttention 2.x CUDA kernels only ship for Ampere (SM8x), Ada (SM8.9)
+    and Hopper (SM9x).  Blackwell GPUs (SM12.0 — RTX 5090, B200, etc.) crash
+    with: "FlashAttention only supports Ampere GPUs or newer".
+
+    This function detects that situation and replaces both
+    ``flash_attn_varlen_func`` and ``flash_attn_func`` with pure-PyTorch
+    ``F.scaled_dot_product_attention`` (SDPA) equivalents.  SDPA dispatches to
+    the best available backend (cuDNN / memory-efficient / math) automatically,
+    so it should work on any GPU CUDA supports.
+
+    The patches are applied *before* any downstream model code is imported
+    (via ``runpy.run_path``), so the ``from flash_attn ... import ...``
+    statements in parallel_states.py / models_audio.py etc. will pick up the
+    replacement functions.
     """
     if not torch.cuda.is_available():
         return
 
     force_flag = os.environ.get("FORCE_SDPA_FALLBACK", "0") == "1"
     major, _minor = torch.cuda.get_device_capability(0)
+    print(f"[wrapper] GPU compute capability: SM {major}.{_minor}")
 
-    # FlashAttention 2.x wheels frequently only recognize SM8x/SM9x.
-    # Blackwell (SM12x) may fail even though hardware is newer.
+    # FlashAttention 2.x wheels frequently only recognise SM8x/SM9x.
+    # Blackwell (SM12x) may fail even though hardware is NEWER.
     needs_patch = force_flag or major >= 10
     if not needs_patch:
+        print("[wrapper] FlashAttention should work natively — no SDPA patch needed")
         return
 
     try:
+        import math
         import torch.nn.functional as F
         import flash_attn.flash_attn_interface as fai
 
+        # ── varlen (packed) fallback ──────────────────────────────────────
         def _sdpa_varlen_fallback(
             q,
             k,
@@ -46,37 +61,133 @@ def _enable_flash_attn_fallback_if_needed():
             cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
+            dropout_p=0.0,
+            softmax_scale=None,
+            causal=False,
             *args,
             **kwargs,
         ):
-            # Expected q/k/v shape: [total_tokens, num_heads, head_dim]
+            """
+            Drop-in replacement for ``flash_attn_varlen_func``.
+
+            Handles the packed variable-length layout used by
+            HunyuanVideo-Avatar's ``parallel_attention`` in inference.
+            q/k/v come in as ``[total_tokens, num_heads, head_dim]``.
+            """
             total_q, num_heads, head_dim = q.shape
             total_k = k.shape[0]
 
-            # Hunyuan uses a packed layout equivalent to [B * max_seqlen, H, D]
-            # for these tensors in inference. Recover batch size from totals.
-            bq = max(1, total_q // max_seqlen_q)
-            bk = max(1, total_k // max_seqlen_k)
-            batch = min(bq, bk)
+            scale = softmax_scale if softmax_scale is not None else (1.0 / math.sqrt(head_dim))
 
-            q4 = q.view(batch, max_seqlen_q, num_heads, head_dim).permute(0, 2, 1, 3).contiguous()
-            k4 = k.view(batch, max_seqlen_k, num_heads, head_dim).permute(0, 2, 1, 3).contiguous()
-            v4 = v.view(batch, max_seqlen_k, num_heads, head_dim).permute(0, 2, 1, 3).contiguous()
+            batch = cu_seqlens_q.numel() - 1
+
+            if batch == 1:
+                # Fast path: single sequence — just reshape, no padding needed.
+                seq_q = max_seqlen_q
+                seq_k = max_seqlen_k
+                q4 = q[:seq_q].view(1, seq_q, num_heads, head_dim).transpose(1, 2)
+                k4 = k[:seq_k].view(1, seq_k, num_heads, head_dim).transpose(1, 2)
+                v4 = v[:seq_k].view(1, seq_k, num_heads, head_dim).transpose(1, 2)
+
+                out = F.scaled_dot_product_attention(
+                    q4, k4, v4,
+                    attn_mask=None,
+                    dropout_p=dropout_p if q.requires_grad else 0.0,
+                    is_causal=causal,
+                    scale=scale,
+                )
+                return out.transpose(1, 2).reshape(total_q, num_heads, head_dim)
+
+            # General path: multiple sequences of (possibly) different lengths.
+            # Pad to max_seqlen and batch them together with an attention mask
+            # to prevent cross-sequence leakage.
+            dtype = q.dtype
+            device = q.device
+
+            q_padded = q.new_zeros(batch, max_seqlen_q, num_heads, head_dim)
+            k_padded = k.new_zeros(batch, max_seqlen_k, num_heads, head_dim)
+            v_padded = v.new_zeros(batch, max_seqlen_k, num_heads, head_dim)
+
+            # Boolean mask: True = attend, False = ignore
+            mask_q = torch.zeros(batch, max_seqlen_q, dtype=torch.bool, device=device)
+            mask_k = torch.zeros(batch, max_seqlen_k, dtype=torch.bool, device=device)
+
+            for i in range(batch):
+                sq = cu_seqlens_q[i + 1] - cu_seqlens_q[i]
+                sk = cu_seqlens_k[i + 1] - cu_seqlens_k[i]
+                q_padded[i, :sq] = q[cu_seqlens_q[i]:cu_seqlens_q[i + 1]]
+                k_padded[i, :sk] = k[cu_seqlens_k[i]:cu_seqlens_k[i + 1]]
+                v_padded[i, :sk] = v[cu_seqlens_k[i]:cu_seqlens_k[i + 1]]
+                mask_q[i, :sq] = True
+                mask_k[i, :sk] = True
+
+            # SDPA wants [B, H, S, D]
+            q4 = q_padded.transpose(1, 2)
+            k4 = k_padded.transpose(1, 2)
+            v4 = v_padded.transpose(1, 2)
+
+            # Build [B, 1, Sq, Sk] mask from the per-sequence masks
+            attn_mask = mask_q.unsqueeze(-1) & mask_k.unsqueeze(-2)  # [B, Sq, Sk]
+            attn_mask = attn_mask.unsqueeze(1)  # [B, 1, Sq, Sk] — broadcast over heads
 
             out = F.scaled_dot_product_attention(
-                q4,
-                k4,
-                v4,
-                attn_mask=None,
-                dropout_p=0.0,
-                is_causal=False,
+                q4, k4, v4,
+                attn_mask=attn_mask,
+                dropout_p=dropout_p if q.requires_grad else 0.0,
+                is_causal=False,  # causal masking + padding is tricky; mask handles it
+                scale=scale,
             )
-            return out.permute(0, 2, 1, 3).contiguous().view(total_q, num_heads, head_dim)
+            # Unpad back to packed layout
+            out = out.transpose(1, 2)  # [B, S, H, D]
+            parts = []
+            for i in range(batch):
+                sq = cu_seqlens_q[i + 1] - cu_seqlens_q[i]
+                parts.append(out[i, :sq])
+            return torch.cat(parts, dim=0)  # [total_q, H, D]
+
+        # ── non-varlen (standard batched) fallback ────────────────────────
+        def _sdpa_func_fallback(
+            q,
+            k,
+            v,
+            dropout_p=0.0,
+            softmax_scale=None,
+            causal=False,
+            *args,
+            **kwargs,
+        ):
+            """
+            Drop-in replacement for ``flash_attn_func``.
+
+            q/k/v shape: ``[batch, seqlen, num_heads, head_dim]``.
+            Returns the same shape.
+            """
+            head_dim = q.shape[-1]
+            scale = softmax_scale if softmax_scale is not None else (1.0 / math.sqrt(head_dim))
+
+            # SDPA expects [B, H, S, D]
+            q4 = q.transpose(1, 2)
+            k4 = k.transpose(1, 2)
+            v4 = v.transpose(1, 2)
+            out = F.scaled_dot_product_attention(
+                q4, k4, v4,
+                attn_mask=None,
+                dropout_p=dropout_p if q.requires_grad else 0.0,
+                is_causal=causal,
+                scale=scale,
+            )
+            return out.transpose(1, 2)  # back to [B, S, H, D]
 
         fai.flash_attn_varlen_func = _sdpa_varlen_fallback
-        print("[wrapper] Patched flash_attn_varlen_func -> SDPA fallback")
+        fai.flash_attn_func = _sdpa_func_fallback
+        print(
+            f"[wrapper] Patched flash_attn_varlen_func + flash_attn_func -> SDPA fallback "
+            f"(SM {major}.{_minor}, force={force_flag})"
+        )
     except Exception as exc:
-        print(f"[wrapper] FlashAttention fallback patch skipped: {exc}")
+        print(f"[wrapper] FlashAttention fallback patch FAILED: {exc}")
+        import traceback
+        traceback.print_exc()
 
 
 def _init_dist():

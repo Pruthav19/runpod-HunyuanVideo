@@ -135,6 +135,15 @@ def is_cuda_oom_error(exc: Exception) -> bool:
 
 def get_best_gpu_index() -> int:
     """Pick the GPU with the most free VRAM (best-effort, defaults to 0)."""
+    idx, _, _ = get_best_gpu_info()
+    return idx
+
+
+def get_best_gpu_info() -> tuple[int, int, int]:
+    """
+    Return (gpu_index, free_mb, total_mb) for the GPU with the most free VRAM.
+    Falls back to (0, 0, 0) on any error.
+    """
     try:
         r = subprocess.run(
             [
@@ -148,19 +157,22 @@ def get_best_gpu_index() -> int:
         )
         best_index = 0
         best_free = -1
+        best_total = 0
         for line in r.stdout.strip().splitlines():
             parts = [p.strip() for p in line.split(",")]
             if len(parts) != 3:
                 continue
             index = int(parts[0])
             free_mb = int(parts[1])
+            total_mb = int(parts[2])
             if free_mb > best_free:
                 best_free = free_mb
                 best_index = index
-        return best_index
+                best_total = total_mb
+        return best_index, max(best_free, 0), best_total
     except Exception as exc:
-        log.warning(f"Could not auto-select GPU, falling back to GPU 0: {exc}")
-        return 0
+        log.warning(f"Could not query GPU VRAM, falling back to GPU 0: {exc}")
+        return 0, 0, 0
 
 
 # ── Avatar image pre-processing ───────────────────────────────────────────────
@@ -589,11 +601,27 @@ def handler(event: dict) -> dict:
         requested_deepcache = int(inp.get("use_deepcache", 1))
         user_gpu_id = inp.get("gpu_id")
         if user_gpu_id is None:
-            target_gpu = get_best_gpu_index()
-            log.info(f"Auto-selected GPU {target_gpu} (most free VRAM)")
+            target_gpu, gpu_free_mb, gpu_total_mb = get_best_gpu_info()
+            log.info(
+                f"Auto-selected GPU {target_gpu} "
+                f"(free={gpu_free_mb} MiB, total={gpu_total_mb} MiB)"
+            )
         else:
             target_gpu = int(user_gpu_id)
+            _, gpu_free_mb, gpu_total_mb = get_best_gpu_info()
             log.info(f"Using requested GPU {target_gpu}")
+
+        # The FP8 model + VAE + text encoders occupy ~30.6 GiB of VRAM.
+        # On GPUs with ≤40 GB total, inference without cpu_offload will
+        # ALWAYS OOM at pixel_value_ref normalisation.  Skip those attempts
+        # entirely to save ~80 s × N wasted model-load cycles.
+        OFFLOAD_REQUIRED_BELOW_MB = 40 * 1024   # 40 GiB
+        force_offload = gpu_total_mb > 0 and gpu_total_mb < OFFLOAD_REQUIRED_BELOW_MB
+        if force_offload:
+            log.info(
+                f"GPU has {gpu_total_mb} MiB total VRAM (< {OFFLOAD_REQUIRED_BELOW_MB} MiB) "
+                f"— cpu_offload will be forced on ALL attempts"
+            )
 
         frame_candidates = []
         for f in (n_frames, 225, 193, 161, 129):
@@ -601,15 +629,20 @@ def handler(event: dict) -> dict:
                 frame_candidates.append(f)
 
         attempts: list[tuple[int, int, bool]] = []
-        attempts.append((frame_candidates[0], requested_deepcache, False))
-        if requested_deepcache == 0:
-            attempts.append((frame_candidates[0], 1, False))
-        # If OOM persists at this point, model + encoders are too large for free VRAM.
-        # Try cpu_offload early before wasting attempts on frame-count reductions.
-        attempts.append((frame_candidates[0], 1, True))
+
+        if not force_offload:
+            # Only try without offload if the GPU actually has enough VRAM
+            attempts.append((frame_candidates[0], requested_deepcache, False))
+            if requested_deepcache == 0:
+                attempts.append((frame_candidates[0], 1, False))
+
+        # With cpu_offload: start at full frames, then reduce
+        attempts.append((frame_candidates[0], requested_deepcache, True))
         for frames in frame_candidates[1:]:
             attempts.append((frames, 1, True))
-        attempts.append((129, 1, True))
+        # Ensure we always have a 129-frame fallback
+        if not any(a[0] == 129 and a[2] for a in attempts):
+            attempts.append((129, 1, True))
 
         raw_video = ""
         last_error: Exception | None = None
