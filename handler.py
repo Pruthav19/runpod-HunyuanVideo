@@ -307,7 +307,7 @@ def run_inference(
     infer_steps: int   = 50,
     cfg_scale: float   = 7.5,
     image_size: int    = 704,    # width — height is fixed at 1280 internally
-    n_frames: int      = 129,    # 129 frames ≈ 5.16 s at 25 fps (max per chunk)
+    n_frames: int      = 65,    # 65 frames ≈ 2.6 s at 25 fps (max per chunk)
     flow_shift: float  = 5.0,
     use_deepcache: int = 1,      # DeepCache acceleration (1=on, 0=off)
     cpu_offload: bool   = False,
@@ -319,7 +319,7 @@ def run_inference(
     Returns the path to the generated mp4.
 
     Long audio (> 5 s) is handled automatically by the model's
-    Time-aware Position Shift Fusion — it generates overlapping 129-frame
+    Time-aware Position Shift Fusion — it generates overlapping 65-frame
     chunks and stitches them together without seam artefacts.
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -526,7 +526,7 @@ def handler(event: dict) -> dict:
         "infer_steps"     : 50,     # diffusion steps (default 50, max ~60)
         "cfg_scale"       : 7.5,    # guidance scale (7.5 recommended, 6–9 range)
         "image_size"      : 704,    # portrait width in px (height auto = 1280)
-        "n_frames"        : 129,    # safer default; model handles long audio via chunking
+        "n_frames"        : 65,    # safer default; model handles long audio via chunking
         "flow_shift"      : 5.0,    # flow-matching shift (5.0 for stable output)
         "use_deepcache"   : 1,      # DeepCache speed-up (1=on, 0=off for max quality)
         "cpu_offload"     : false,  # optional, auto-enabled for risky frame/VRAM combos
@@ -591,8 +591,8 @@ def handler(event: dict) -> dict:
         # Keep n_frames conservative by default.
         # HunyuanVideo-Avatar already chunks long audio internally; using 257
         # can spike VRAM heavily on single-GPU inference.
-        n_frames = int(inp.get("n_frames", 129))
-        n_frames = max(129, min(n_frames, 257))
+        n_frames = int(inp.get("n_frames", 65))
+        n_frames = max(65, min(n_frames, 257))
         log.info(f"n_frames = {n_frames} (user/default setting)")
 
         # ── Step 3: Inference ────────────────────────────────────────────────
@@ -632,8 +632,8 @@ def handler(event: dict) -> dict:
         # On 80GB A100-class cards, very high frame counts can still OOM near
         # the attention/MLP blocks (observed around n_frames=257). Auto-enable
         # cpu_offload unless user explicitly requested otherwise.
-        if gpu_total_mb >= 80 * 1024 and n_frames >= 193 and "cpu_offload" not in inp:
-            force_offload = True
+        if gpu_total_mb >= 30 * 1024 and n_frames >= 193 and "cpu_offload" not in inp:
+            force_offload = False
             offload_reason = (
                 f"n_frames={n_frames} on ~80GB GPU can OOM in attention/MLP blocks"
             )
@@ -653,8 +653,8 @@ def handler(event: dict) -> dict:
             attempts.append((n_frames, requested_deepcache, effective_cpu_offload))
             if requested_deepcache == 0:
                 attempts.append((n_frames, 1, effective_cpu_offload))
-            if n_frames != 129:
-                attempts.append((129, 1, True))
+            if n_frames != 65:
+                attempts.append((65, 1, True))
 
         log.info(
             f"retry_on_oom={retry_on_oom}; planned attempts={len(attempts)}; "
