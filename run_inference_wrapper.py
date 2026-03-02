@@ -42,7 +42,7 @@ def _enable_flash_attn_fallback_if_needed():
 
     # FlashAttention 2.x wheels frequently only recognise SM8x/SM9x.
     # Blackwell (SM12x) may fail even though hardware is NEWER.
-    needs_patch = force_flag or major >= 10
+    needs_patch = force_flag
     if not needs_patch:
         print("[wrapper] FlashAttention should work natively — no SDPA patch needed")
         return
