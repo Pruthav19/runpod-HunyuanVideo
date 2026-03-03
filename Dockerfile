@@ -1,8 +1,8 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # HunyuanVideo-Avatar — RunPod Serverless Worker
-# GPU target : NVIDIA RTX 5090 (Blackwell, sm_120, 32 GB VRAM)
-# CUDA       : 12.8  ← required for Blackwell / sm_120
-# PyTorch    : 2.7.0 ← first stable release with official sm_120 support
+# GPU target : NVIDIA H100 80 GB (Hopper, sm_90) — also works on A100 (sm_80)
+# CUDA       : 12.8
+# PyTorch    : 2.7.0
 # ══════════════════════════════════════════════════════════════════════════════
 FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04
 
@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/python3    /usr/bin/python \
     && rm -rf /var/lib/apt/lists/*
 
-# ---------- PyTorch 2.7.0 + CUDA 12.8 (Blackwell sm_120 support) -------------
+# ---------- PyTorch 2.7.0 + CUDA 12.8 ----------------------------------------
 RUN pip install --upgrade pip && \
     pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
         --index-url https://download.pytorch.org/whl/cu128
@@ -45,14 +45,14 @@ RUN git clone --depth=1 https://github.com/sczhou/CodeFormer.git /app/codeformer
 #
 # To generate the pre-built wheel, run build_flash_attn_wheel.sh once on a
 # RunPod GPU pod and upload the resulting .whl to GitHub Releases.
-ARG FLASH_ATTN_WHEEL_URL="https://github.com/Pruthav19/runpod-HunyuanVideo/releases/download/flash-attn-wheel/flash_attn-2.7.0-cp310-cp310-linux_x86_64.whl"
+ARG FLASH_ATTN_WHEEL_URL=""
 RUN pip install ninja packaging && \
     if [ -n "${FLASH_ATTN_WHEEL_URL}" ]; then \
         echo "📦  Installing pre-built flash-attn wheel from: ${FLASH_ATTN_WHEEL_URL}" && \
         pip install --no-build-isolation "${FLASH_ATTN_WHEEL_URL}"; \
     else \
-        echo "🔨  No pre-built wheel found — compiling from source (MAX_JOBS=1, ~90 min)..." && \
-        MAX_JOBS=1 NVCC_THREADS=1 TORCH_CUDA_ARCH_LIST="12.0" \
+        echo "🔨  Compiling flash-attn from source for Ampere + Hopper (SM 8.0, 9.0)..." && \
+        TORCH_CUDA_ARCH_LIST="8.0;9.0" MAX_JOBS=2 \
         pip install --no-build-isolation \
             git+https://github.com/Dao-AILab/flash-attention.git@v2.7.0; \
     fi

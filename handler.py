@@ -33,7 +33,7 @@ S3_ACCESS_KEY= os.environ.get("S3_ACCESS_KEY", "")
 S3_SECRET_KEY= os.environ.get("S3_SECRET_KEY", "")
 S3_ENDPOINT  = os.environ.get("S3_ENDPOINT",   None)   # Cloudflare R2 / MinIO
 
-# FP8 checkpoint path (fits in 32 GB VRAM of RTX 5090)
+# FP8 checkpoint path (fits comfortably in 80 GB VRAM of H100)
 CKPT_PATH = os.path.join(
     MODEL_DIR,
     "hunyuan_avatar",
@@ -304,10 +304,10 @@ def run_inference(
     emotion_image_path: str | None = None,
     *,
     # Quality / speed knobs
-    infer_steps: int   = 50,
+    infer_steps: int   = 30,
     cfg_scale: float   = 7.5,
     image_size: int    = 704,    # width — height is fixed at 1280 internally
-    n_frames: int      = 65,    # 65 frames ≈ 2.6 s at 25 fps (max per chunk)
+    n_frames: int      = 129,    # 129 frames ≈ 5.16 s at 25 fps (max per chunk)
     flow_shift: float  = 5.0,
     use_deepcache: int = 1,      # DeepCache acceleration (1=on, 0=off)
     cpu_offload: bool   = False,
@@ -339,7 +339,7 @@ def run_inference(
         "--use-deepcache",      str(use_deepcache),
         "--flow-shift-eval-video", str(flow_shift),
         "--save-path",          output_dir,
-        "--use-fp8",            # FP8 quantised transformer — fits 32 GB VRAM
+        "--use-fp8",            # FP8 quantised transformer — fits 80 GB VRAM easily
     ]
 
     if cpu_offload:
@@ -470,7 +470,6 @@ def postprocess(
             "--output_path", frames_esr,
             "--model_path",  esr_weights,
             "--outscale",    "2",
-            "--fp32",        # safer on Blackwell until fp16 rounding issues ironed out
         ]
         esr_result = subprocess.run(esr_cmd, capture_output=True, text=True)
         if esr_result.returncode != 0:
@@ -523,13 +522,13 @@ def handler(event: dict) -> dict:
                                                # drives Audio Emotion Module (AEM)
 
         # ── Inference knobs ──────────────────────────────────────────────────
-        "infer_steps"     : 50,     # diffusion steps (default 50, max ~60)
+        "infer_steps"     : 30,     # diffusion steps (default 30; use 50 for max quality)
         "cfg_scale"       : 7.5,    # guidance scale (7.5 recommended, 6–9 range)
         "image_size"      : 704,    # portrait width in px (height auto = 1280)
-        "n_frames"        : 65,    # safer default; model handles long audio via chunking
+        "n_frames"        : 129,    # frames per chunk (129 ≈ 5.16s; min=65, max=257)
         "flow_shift"      : 5.0,    # flow-matching shift (5.0 for stable output)
         "use_deepcache"   : 1,      # DeepCache speed-up (1=on, 0=off for max quality)
-        "cpu_offload"     : false,  # optional, auto-enabled for risky frame/VRAM combos
+        "cpu_offload"     : false,  # optional, auto-enabled for GPUs < 40 GB
         "retry_on_oom"    : false,  # default fast-fail; set true to try fallback ladder
 
         # ── Post-processing ──────────────────────────────────────────────────
@@ -591,13 +590,13 @@ def handler(event: dict) -> dict:
         # Keep n_frames conservative by default.
         # HunyuanVideo-Avatar already chunks long audio internally; using 257
         # can spike VRAM heavily on single-GPU inference.
-        n_frames = int(inp.get("n_frames", 65))
+        n_frames = int(inp.get("n_frames", 129))
         n_frames = max(65, min(n_frames, 257))
         log.info(f"n_frames = {n_frames} (user/default setting)")
 
         # ── Step 3: Inference ────────────────────────────────────────────────
         infer_out_dir = os.path.join(job_dir, "infer_out")
-        infer_steps = int(inp.get("infer_steps", 50))
+        infer_steps = int(inp.get("infer_steps", 30))
         cfg_scale = float(inp.get("cfg_scale", 7.5))
         image_size = int(inp.get("image_size", 704))
         flow_shift = float(inp.get("flow_shift", 5.0))
@@ -626,16 +625,20 @@ def handler(event: dict) -> dict:
         force_offload = gpu_total_mb > 0 and gpu_total_mb < OFFLOAD_REQUIRED_BELOW_MB
         if force_offload:
             offload_reason = (
-                f"GPU total VRAM {gpu_total_mb} MiB is below {OFFLOAD_REQUIRED_BELOW_MB} MiB"
+                f"GPU total VRAM {gpu_total_mb} MiB < {OFFLOAD_REQUIRED_BELOW_MB} MiB — model won't fit"
             )
 
-        # On 80GB A100-class cards, very high frame counts can still OOM near
-        # the attention/MLP blocks (observed around n_frames=257). Auto-enable
-        # cpu_offload unless user explicitly requested otherwise.
-        if gpu_total_mb >= 30 * 1024 and n_frames >= 193 and "cpu_offload" not in inp:
-            force_offload = False
+        # On mid-range GPUs (40–79 GB), very high frame counts can still OOM
+        # in the attention/MLP blocks. Auto-enable offload as a safety net.
+        if (
+            not force_offload
+            and n_frames >= 193
+            and 0 < gpu_total_mb < 80 * 1024
+            and "cpu_offload" not in inp
+        ):
+            force_offload = True
             offload_reason = (
-                f"n_frames={n_frames} on ~80GB GPU can OOM in attention/MLP blocks"
+                f"n_frames={n_frames} on {gpu_total_mb} MiB GPU may OOM in attention blocks"
             )
 
         if force_offload:

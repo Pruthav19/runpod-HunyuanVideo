@@ -25,7 +25,7 @@ def parse_args():
     p.add_argument("--model_path",  required=True)
     p.add_argument("--outscale",    type=float, default=2.0)
     p.add_argument("--fp32",        action="store_true",
-                   help="Use FP32 instead of FP16 (safer on new GPU architectures like Blackwell)")
+                   help="Use FP32 instead of FP16 (default: FP16 for speed)")
     return p.parse_args()
 
 
@@ -37,7 +37,7 @@ def main():
     from realesrgan import RealESRGANer
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # On Blackwell (sm_120) FP16 may produce NaNs in early driver versions — default to FP32
+    # FP16 is safe and fast on Ampere/Hopper GPUs
     half = not args.fp32 and torch.cuda.is_available()
 
     model = RRDBNet(

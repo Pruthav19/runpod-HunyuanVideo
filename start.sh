@@ -1,7 +1,7 @@
 #!/bin/bash
 # ══════════════════════════════════════════════════════════════════════════════
 # HunyuanVideo-Avatar  —  RunPod Serverless Entrypoint
-# GPU  : RTX 5090 (Blackwell sm_120, 32 GB VRAM)
+# GPU  : H100 80 GB (Hopper sm_90) — also works on A100 (sm_80)
 # CUDA : 12.8
 # ══════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -57,11 +57,10 @@ export INSIGHTFACE_HOME="${HUNYUAN_WEIGHTS}/ckpts"
 # across cold starts on the network volume instead of re-downloading every time.
 export FACEXLIB_CACHE="${MODEL_DIR}/facexlib"
 
-# Blackwell sm_120 CUDA tuning
-# Leave CUDA_VISIBLE_DEVICES unset by default so multi-GPU pods expose all GPUs.
-# The handler picks a target device per request (auto or input.gpu_id).
-export TORCH_CUDA_ARCH_LIST="12.0"         # compile CUDA kernels only for sm_120
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"  # PyTorch 2.4+ allocator — reduces fragmentation on large VRAM GPUs
+# Do NOT hardcode TORCH_CUDA_ARCH_LIST — the flash-attn wheel was already compiled
+# for the correct SM targets (8.0 + 9.0) at Docker-build time.
+# CUDA allocator tuning — reduces fragmentation on large-VRAM GPUs.
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 echo ""
 echo "🎬  Starting serverless handler..."
