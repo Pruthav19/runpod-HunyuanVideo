@@ -6,7 +6,7 @@
 # Requirements (RunPod pod setup):
 #   • Image : runpod/pytorch:2.7.0-py3.10-cuda12.8.1-devel-ubuntu22.04
 #             (or any image matching the Dockerfile base)
-#   • GPU   : Any CUDA-capable GPU (RTX 5090 preferred, any Ampere+ works)
+#   • GPU   : Any CUDA-capable GPU (A100 / H100 preferred, any Ampere+ works)
 #   • Disk  : 10 GB container disk (wheel is ~200 MB)
 #
 # How to use:
@@ -39,16 +39,13 @@ pip install ninja packaging --quiet
 
 mkdir -p "${WHEEL_DIR}"
 
-echo "🔨 Compiling (uses all CPU cores — ~8-15 min on most pods)..."
+# Target A100 (sm_80) + H100 (sm_90) — the two main data-centre GPUs.
+# This makes the wheel usable on BOTH architectures regardless of which
+# GPU the build pod has.
+export TORCH_CUDA_ARCH_LIST="8.0;9.0"
+
+echo "🔨 Compiling for ${TORCH_CUDA_ARCH_LIST} (~15-30 min)..."
 MAX_JOBS="$(nproc)" \
-TORCH_CUDA_ARCH_LIST="$(python3 -c "
-import torch
-caps = set()
-for i in range(torch.cuda.device_count()):
-    cc = torch.cuda.get_device_capability(i)
-    caps.add(f'{cc[0]}.{cc[1]}')
-print(';'.join(sorted(caps)))
-")" \
 pip wheel --no-build-isolation \
     --wheel-dir "${WHEEL_DIR}" \
     "git+https://github.com/Dao-AILab/flash-attention.git@${FLASH_ATTN_TAG}"
@@ -72,8 +69,8 @@ echo "   pip install gh || apt-get install -y gh"
 echo "   gh auth login"
 echo "   gh release create ${RELEASE_TAG} \\"
 echo "       --repo ${REPO} \\"
-echo "       --title 'flash-attn pre-built wheel (torch2.7+cu128+sm120)' \\"
-echo "       --notes 'Pre-built for torch==2.7.0 CUDA 12.8 sm_120 cp310' \\"
+echo "       --title 'flash-attn pre-built wheel (torch2.7+cu128+sm80+sm90)' \\"
+echo "       --notes 'Pre-built for torch==2.7.0 CUDA 12.8 sm_80+sm_90 cp310' \\"
 echo "       '${WHEEL_FILE}'"
 echo ""
 echo " Option B: Copy the wheel locally then upload via GitHub UI"
