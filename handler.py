@@ -307,7 +307,7 @@ def run_inference(
     infer_steps: int   = 30,
     cfg_scale: float   = 7.5,
     image_size: int    = 704,    # width — height is fixed at 1280 internally
-    n_frames: int      = 65,     # 65 frames ≈ 2.6 s at 25 fps — fits H100 80 GB without offload
+    n_frames: int      = 129,    # model hardcodes 129 internally; this controls dataset chunking only
     flow_shift: float  = 5.0,
     use_deepcache: int = 1,      # DeepCache acceleration (1=on, 0=off)
     cpu_offload: bool   = False,
@@ -319,8 +319,12 @@ def run_inference(
     Returns the path to the generated mp4.
 
     Long audio (> 5 s) is handled automatically by the model's
-    Time-aware Position Shift Fusion — it generates overlapping 65-frame
+    Time-aware Position Shift Fusion — it generates overlapping 129-frame
     chunks and stitches them together without seam artefacts.
+
+    NOTE: target_length=129 is hardcoded in sample_inference_audio.py.
+    The --sample-n-frames arg only affects dataset chunking, NOT per-chunk
+    VRAM. cpu_offload is required on GPUs ≤ 82 GB.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -525,7 +529,7 @@ def handler(event: dict) -> dict:
         "infer_steps"     : 30,     # diffusion steps (default 30; use 50 for max quality)
         "cfg_scale"       : 7.5,    # guidance scale (7.5 recommended, 6–9 range)
         "image_size"      : 704,    # portrait width in px (height auto = 1280)
-        "n_frames"        : 65,     # frames per chunk (65 ≈ 2.6s; fits 80 GB; max=257)
+        "n_frames"        : 129,    # model hardcodes 129 internally (≈5.2s at 25fps)
         "flow_shift"      : 5.0,    # flow-matching shift (5.0 for stable output)
         "use_deepcache"   : 1,      # DeepCache speed-up (1=on, 0=off for max quality)
         "cpu_offload"     : false,  # auto-enabled when VRAM is tight for chosen n_frames
@@ -587,12 +591,14 @@ def handler(event: dict) -> dict:
         duration = get_audio_duration(wav_path)
         log.info(f"Audio duration: {duration:.1f}s")
 
-        # Keep n_frames conservative by default.
-        # HunyuanVideo-Avatar already chunks long audio internally; using 257
-        # can spike VRAM heavily on single-GPU inference.
-        n_frames = int(inp.get("n_frames", 65))
+        # NOTE: The HunyuanVideo-Avatar model HARDCODES target_length=129
+        # inside sample_inference_audio.py — the --sample-n-frames CLI arg
+        # does NOT change the actual generation size or per-chunk VRAM usage.
+        # We still pass it for dataset chunking of long audio, but VRAM per
+        # chunk is always ~75 GiB (129 frames at 704×1280 FP8).
+        n_frames = int(inp.get("n_frames", 129))
         n_frames = max(65, min(n_frames, 257))
-        log.info(f"n_frames = {n_frames} (user/default setting)")
+        log.info(f"n_frames = {n_frames} (dataset chunking; model always generates 129 frames/chunk)")
 
         # ── Step 3: Inference ────────────────────────────────────────────────
         infer_out_dir = os.path.join(job_dir, "infer_out")
@@ -616,43 +622,21 @@ def handler(event: dict) -> dict:
 
         requested_cpu_offload = bool(inp.get("cpu_offload", False))
 
-        # The FP8 model + VAE + text encoders occupy ~30.6 GiB of VRAM.
-        # On GPUs with ≤40 GB total, inference without cpu_offload will
-        # ALWAYS OOM at pixel_value_ref normalisation.  Skip those attempts
-        # entirely to save ~80 s × N wasted model-load cycles.
-        OFFLOAD_REQUIRED_BELOW_MB = 40 * 1024   # 40 GiB
+        # ── Auto-offload logic ─────────────────────────────────────────
+        # The model HARDCODES target_length=129 (sample_inference_audio.py)
+        # which needs ~75 GiB for the FP8 transformer + VAE + activations.
+        # Single-stream MLP concat blocks at models_audio.py:343 allocate
+        # an extra 6.55 GiB spike, so total peak ≈ 81+ GiB.
+        # -> On ANY GPU with ≤82 GB, cpu_offload is REQUIRED.
         offload_reason = ""
-        force_offload = gpu_total_mb > 0 and gpu_total_mb < OFFLOAD_REQUIRED_BELOW_MB
-        if force_offload:
-            offload_reason = (
-                f"GPU total VRAM {gpu_total_mb} MiB < {OFFLOAD_REQUIRED_BELOW_MB} MiB — model won't fit"
-            )
+        force_offload = False
 
-        # On 80 GB-class GPUs (H100 SXM = 81559 MiB), n_frames=129 uses
-        # ~75 GiB and OOMs in the single-stream MLP concat blocks.
-        # Auto-enable cpu_offload when VRAM is tight for the chosen n_frames.
-        if (
-            not force_offload
-            and n_frames >= 97
-            and 0 < gpu_total_mb <= 82 * 1024
-            and "cpu_offload" not in inp
-        ):
+        if 0 < gpu_total_mb <= 82 * 1024:
+            # H100 80 GB (81559 MiB), A100 80 GB, or smaller
             force_offload = True
             offload_reason = (
-                f"n_frames={n_frames} needs >80 GiB; auto-enabling cpu_offload "
-                f"(GPU has {gpu_total_mb} MiB)"
-            )
-
-        # On mid-range GPUs (40–79 GB), even moderate frame counts can OOM.
-        if (
-            not force_offload
-            and n_frames >= 65
-            and 0 < gpu_total_mb < 80 * 1024
-            and "cpu_offload" not in inp
-        ):
-            force_offload = True
-            offload_reason = (
-                f"n_frames={n_frames} on {gpu_total_mb} MiB GPU — offload as safety net"
+                f"Model hardcodes 129 frames → peak ~81 GiB; "
+                f"GPU has {gpu_total_mb} MiB — cpu_offload required"
             )
 
         if force_offload:
