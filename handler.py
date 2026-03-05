@@ -307,7 +307,7 @@ def run_inference(
     infer_steps: int   = 30,
     cfg_scale: float   = 7.5,
     image_size: int    = 704,    # width — height is fixed at 1280 internally
-    n_frames: int      = 129,    # 129 frames ≈ 5.16 s at 25 fps (max per chunk)
+    n_frames: int      = 65,     # 65 frames ≈ 2.6 s at 25 fps — fits H100 80 GB without offload
     flow_shift: float  = 5.0,
     use_deepcache: int = 1,      # DeepCache acceleration (1=on, 0=off)
     cpu_offload: bool   = False,
@@ -525,10 +525,10 @@ def handler(event: dict) -> dict:
         "infer_steps"     : 30,     # diffusion steps (default 30; use 50 for max quality)
         "cfg_scale"       : 7.5,    # guidance scale (7.5 recommended, 6–9 range)
         "image_size"      : 704,    # portrait width in px (height auto = 1280)
-        "n_frames"        : 129,    # frames per chunk (129 ≈ 5.16s; min=65, max=257)
+        "n_frames"        : 65,     # frames per chunk (65 ≈ 2.6s; fits 80 GB; max=257)
         "flow_shift"      : 5.0,    # flow-matching shift (5.0 for stable output)
         "use_deepcache"   : 1,      # DeepCache speed-up (1=on, 0=off for max quality)
-        "cpu_offload"     : false,  # optional, auto-enabled for GPUs < 40 GB
+        "cpu_offload"     : false,  # auto-enabled when VRAM is tight for chosen n_frames
         "retry_on_oom"    : false,  # default fast-fail; set true to try fallback ladder
 
         # ── Post-processing ──────────────────────────────────────────────────
@@ -590,7 +590,7 @@ def handler(event: dict) -> dict:
         # Keep n_frames conservative by default.
         # HunyuanVideo-Avatar already chunks long audio internally; using 257
         # can spike VRAM heavily on single-GPU inference.
-        n_frames = int(inp.get("n_frames", 129))
+        n_frames = int(inp.get("n_frames", 65))
         n_frames = max(65, min(n_frames, 257))
         log.info(f"n_frames = {n_frames} (user/default setting)")
 
@@ -628,17 +628,31 @@ def handler(event: dict) -> dict:
                 f"GPU total VRAM {gpu_total_mb} MiB < {OFFLOAD_REQUIRED_BELOW_MB} MiB — model won't fit"
             )
 
-        # On mid-range GPUs (40–79 GB), very high frame counts can still OOM
-        # in the attention/MLP blocks. Auto-enable offload as a safety net.
+        # On 80 GB-class GPUs (H100 SXM = 81559 MiB), n_frames=129 uses
+        # ~75 GiB and OOMs in the single-stream MLP concat blocks.
+        # Auto-enable cpu_offload when VRAM is tight for the chosen n_frames.
         if (
             not force_offload
-            and n_frames >= 193
+            and n_frames >= 97
+            and 0 < gpu_total_mb <= 82 * 1024
+            and "cpu_offload" not in inp
+        ):
+            force_offload = True
+            offload_reason = (
+                f"n_frames={n_frames} needs >80 GiB; auto-enabling cpu_offload "
+                f"(GPU has {gpu_total_mb} MiB)"
+            )
+
+        # On mid-range GPUs (40–79 GB), even moderate frame counts can OOM.
+        if (
+            not force_offload
+            and n_frames >= 65
             and 0 < gpu_total_mb < 80 * 1024
             and "cpu_offload" not in inp
         ):
             force_offload = True
             offload_reason = (
-                f"n_frames={n_frames} on {gpu_total_mb} MiB GPU may OOM in attention blocks"
+                f"n_frames={n_frames} on {gpu_total_mb} MiB GPU — offload as safety net"
             )
 
         if force_offload:
